@@ -1,7 +1,7 @@
-# Dashboard & Rapor Analizörü — v6.1 (UI düzenli)
-- Üç sağlayıcı: OpenAI, Azure OpenAI, Google Gemini
-- Sekmeli arayüz: Bağlantı → Yükle → Sonuçlar
-- Kart tasarımı, status/ilerleme, kompakt yerleşim
+# Dashboard & Rapor Analizörü — v6.1.1
+- Gemini 404 için model adları `gemini-1.5-flash-001` / `gemini-1.5-pro-001` olarak güncellendi.
+- Gerekirse otomatik `models/` öneki fallback’i var.
+- UI: 3 sekme + kartlar (v6.1 ile aynı).
 
 ## Çalıştırma
 ```bash

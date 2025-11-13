@@ -1,4 +1,5 @@
-# app.py — Dashboard & Rapor Analizörü v6.1 (OpenAI + Azure OpenAI + Google Gemini) — Polished UI
+# app.py — Dashboard & Rapor Analizörü v6.1.1
+# OpenAI + Azure OpenAI + Google Gemini (model isim fix)
 import os, io, re, json, base64, time
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -8,54 +9,30 @@ import requests
 import matplotlib.pyplot as plt
 import pandas as pd
 
-# Optional SDKs
 try:
     from openai import OpenAI, AzureOpenAI
 except Exception:
     OpenAI = AzureOpenAI = None
 try:
     import google.generativeai as genai
+    from google.api_core.exceptions import NotFound
 except Exception:
     genai = None
+    class NotFound(Exception): pass
 
 st.set_page_config(page_title="Dashboard & Rapor Analizörü", page_icon="🧠", layout="wide")
 
 # -------------------- STYLE --------------------
-CUSTOM_CSS = """
+st.markdown("""
 <style>
-/* Compact spacing */
 section.main > div { padding-top: 1rem; }
 .block-container { padding-top: 1rem; padding-bottom: 1rem; }
-
-/* Card */
-.card {
-  border-radius: 14px;
-  border: 1px solid #e5e7eb;
-  padding: 14px 16px;
-  background: #ffffff;
-  box-shadow: 0 2px 10px rgba(2,6,23,0.04);
-}
-.card h4 { margin: 0 0 6px 0; }
-.badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #eef2ff;
-  color: #3730a3;
-  font-size: 12px;
-  margin-left: 8px;
-}
-.kpi {
-  border-radius: 14px;
-  padding: 16px;
-  text-align: center;
-  background: #f8fafc;
-  border: 1px dashed #e2e8f0;
-}
-hr.soft { border: none; border-top: 1px solid #eef2f7; margin: 18px 0; }
+.card { border-radius: 14px; border:1px solid #e5e7eb; padding:14px 16px; background:#fff; box-shadow:0 2px 10px rgba(2,6,23,.04); }
+.card h4 { margin:0 0 6px 0; }
+.badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; margin-left:8px; }
+hr.soft { border:none; border-top:1px solid #eef2f7; margin:18px 0; }
 </style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # -------------------- HELPERS --------------------
 def b64_from_bytes(data: bytes, mime: str) -> str:
@@ -66,16 +43,12 @@ def safe_json_extract(text: str) -> Optional[Dict[str, Any]]:
         return None
     m = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", text, re.IGNORECASE)
     if m:
-        try:
-            return json.loads(m.group(1))
-        except Exception:
-            pass
+        try: return json.loads(m.group(1))
+        except Exception: pass
     m2 = re.search(r"(\{[\s\S]*\})", text)
     if m2:
-        try:
-            return json.loads(m2.group(1))
-        except Exception:
-            return None
+        try: return json.loads(m2.group(1))
+        except Exception: return None
     return None
 
 def _limit_df(df: pd.DataFrame, max_rows: int = 100, max_cols: int = 50) -> pd.DataFrame:
@@ -110,31 +83,23 @@ def dataframe_to_prompt(df: pd.DataFrame, file_name: str, low_cost: bool=False) 
 def read_table_file(file_name: str, file_bytes: bytes, mime: str) -> pd.DataFrame:
     buf = io.BytesIO(file_bytes)
     lname = file_name.lower()
-    if mime == "text/csv" or lname.endswith(".csv"):
-        return pd.read_csv(buf)
-    if mime == "text/tsv" or lname.endswith(".tsv"):
-        return pd.read_csv(buf, sep="\t")
-    if "spreadsheetml" in mime or lname.endswith((".xlsx",".xls")):
-        return pd.read_excel(buf)
-    if "parquet" in mime or lname.endswith(".parquet"):
-        return pd.read_parquet(buf)
+    if mime == "text/csv" or lname.endswith(".csv"): return pd.read_csv(buf)
+    if mime == "text/tsv" or lname.endswith(".tsv"): return pd.read_csv(buf, sep="\t")
+    if "spreadsheetml" in mime or lname.endswith((".xlsx",".xls")): return pd.read_excel(buf)
+    if "parquet" in mime or lname.endswith(".parquet"): return pd.read_parquet(buf)
     return pd.read_csv(buf)
 
 def fetch_from_url(url: str) -> Optional[tuple]:
     try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        content_type = (r.headers.get("Content-Type") or "").lower()
-        data = r.content
-        u = url.lower()
-        if "pdf" in content_type or u.endswith(".pdf"): return ("application/pdf", data)
-        if "png" in content_type or u.endswith(".png"): return ("image/png", data)
-        if "jpeg" in content_type or "jpg" in content_type or u.endswith((".jpg",".jpeg")): return ("image/jpeg", data)
-        if "text/csv" in content_type or u.endswith(".csv"): return ("text/csv", data)
-        if "text/tab-separated-values" in content_type or u.endswith(".tsv"): return ("text/tsv", data)
-        if "spreadsheet" in content_type or "sheet" in content_type or u.endswith((".xlsx",".xls")):
-            return ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
-        if "parquet" in content_type or u.endswith(".parquet"): return ("application/parquet", data)
+        r = requests.get(url, timeout=30); r.raise_for_status()
+        ct = (r.headers.get("Content-Type") or "").lower(); data = r.content; u = url.lower()
+        if "pdf" in ct or u.endswith(".pdf"): return ("application/pdf", data)
+        if "png" in ct or u.endswith(".png"): return ("image/png", data)
+        if "jpeg" in ct or "jpg" in ct or u.endswith((".jpg",".jpeg")): return ("image/jpeg", data)
+        if "text/csv" in ct or u.endswith(".csv"): return ("text/csv", data)
+        if "text/tab-separated-values" in ct or u.endswith(".tsv"): return ("text/tsv", data)
+        if "spreadsheet" in ct or "sheet" in ct or u.endswith((".xlsx",".xls")): return ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
+        if "parquet" in ct or u.endswith(".parquet"): return ("application/parquet", data)
         return None
     except Exception:
         return None
@@ -157,8 +122,7 @@ def build_instructions(detail_level: str, language: str, template_key: str, cust
         "IT Operasyonları": "- Incident/MTTR/MTBF, SLA ihlalleri, kapasite ve kök neden örüntüleri.",
     }
     base = re.sub(r"\n[ \t]+", "\n", base).strip()
-    extra = templates.get(template_key, "")
-    custom = custom_template.strip() if custom_template else ""
+    extra = templates.get(template_key, ""); custom = custom_template.strip() if custom_template else ""
     if low_cost: base += "\n\nKısıt: Token tasarrufu yap; yalnızca en kritik bulguları yaz."
     return base + ("\n\n"+extra if extra else "") + ("\n"+custom if custom else "")
 
@@ -182,8 +146,26 @@ def make_clients(provider: str, creds: dict):
     else:
         if genai is None: raise RuntimeError("google-generativeai paketi kurulu değil.")
         genai.configure(api_key=creds["GEMINI_API_KEY"])
-        model = genai.GenerativeModel(creds["gemini_model"])
-        return {"client": model, "model": creds["gemini_model"]}
+        # SDK'nın v1beta/v1 farklarına takılmamak için -001 son ekli adları kullan
+        model_name = creds["gemini_model"]
+        model = genai.GenerativeModel(model_name)
+        return {"client": model, "model": model_name}
+
+# ---------- Gemini safe call helper ----------
+def gemini_generate_content(model, parts):
+    try:
+        return model.generate_content(parts)
+    except NotFound as e:
+        # Bazı projelerde `models/` öneki ve/veya -001 ihtiyaç olabiliyor
+        name = getattr(model, "model_name", None) or getattr(model, "_model", None)
+        try_name = f"models/{name}" if name and not name.startswith("models/") else name
+        if try_name:
+            try:
+                m2 = type(model)(try_name)  # aynı sınıfla yeni model
+                return m2.generate_content(parts)
+            except Exception:
+                raise e
+        raise e
 
 # -------------------- Model calls --------------------
 def call_on_image(provider: str, client_obj, model_name: str, prompt: str, image_bytes: bytes, mime: str) -> str:
@@ -198,7 +180,7 @@ def call_on_image(provider: str, client_obj, model_name: str, prompt: str, image
         return getattr(resp,"output_text",None) or resp.output[0].content[0].text
     else:
         image_part = {"mime_type": mime, "data": image_bytes}
-        resp = client_obj.generate_content([prompt, image_part])
+        resp = gemini_generate_content(client_obj, [prompt, image_part])
         return resp.text
 
 def call_on_pdf(provider: str, client_obj, model_name: str, prompt: str, file_name: str, file_bytes: bytes) -> str:
@@ -214,7 +196,7 @@ def call_on_pdf(provider: str, client_obj, model_name: str, prompt: str, file_na
         return getattr(resp,"output_text",None) or resp.output[0].content[0].text
     else:
         uploaded = genai.upload_file(bytes=file_bytes, mime_type="application/pdf", display_name=file_name)
-        resp = client_obj.generate_content([prompt, uploaded])
+        resp = gemini_generate_content(client_obj, [prompt, uploaded])
         return resp.text
 
 def call_on_table(provider: str, client_obj, model_name: str, prompt: str, table_prompt: str) -> str:
@@ -225,7 +207,7 @@ def call_on_table(provider: str, client_obj, model_name: str, prompt: str, table
         )
         return getattr(resp,"output_text",None) or resp.output[0].content[0].text
     else:
-        resp = client_obj.generate_content([prompt, table_prompt])
+        resp = gemini_generate_content(client_obj, [prompt, table_prompt])
         return resp.text
 
 def call_for_qa(provider: str, client_obj, model_name: str, analysis_text: str, history: List[dict], user_question: str, lang: str) -> str:
@@ -252,109 +234,80 @@ def call_for_qa(provider: str, client_obj, model_name: str, analysis_text: str, 
         )
         return getattr(resp,"output_text",None) or resp.output[0].content[0].text
     else:
-        resp = client_obj.generate_content(qa_prompt)
+        resp = gemini_generate_content(client_obj, qa_prompt)
         return resp.text
 
-# -------------------- UI LAYOUT --------------------
+# -------------------- UI --------------------
 st.markdown("## 🧠 Dashboard & Rapor Analizörü")
-st.caption("Daha derli toplu arayüz: 1) Bağlantı → 2) Yükle & Çalıştır → 3) Sonuçlar & Q&A")
-
+st.caption("Derli toplu arayüz: 1) Bağlantı → 2) Yükle & Çalıştır → 3) Sonuçlar & Q&A")
 tabs = st.tabs(["🔌 Bağlantı", "📤 Yükle & Çalıştır", "📊 Sonuçlar & Q&A"])
 
 with tabs[0]:
     st.subheader("Sağlayıcı ve Kimlik Bilgileri")
     colA, colB = st.columns([1,1])
     with colA:
-        provider = st.radio("Sağlayıcı", [Provider.OPENAI, Provider.AZURE, Provider.GEMINI], index=1, horizontal=True)
+        provider = st.radio("Sağlayıcı", ["OpenAI","Azure OpenAI","Google Gemini"], index=1, horizontal=True)
     with colB:
-        low_cost = st.toggle("🔋 Düşük maliyet modu", value=True, help="Token tüketimini azaltır (özet kısaltma).")
+        low_cost = st.toggle("🔋 Düşük maliyet modu", value=True)
 
-    with st.container():
-        if provider == Provider.OPENAI:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            openai_key = st.text_input("OPENAI_API_KEY", type="password", value="")
-            model = st.selectbox("Model", ["gpt-4o","gpt-4o-mini"], index=1)
-            st.markdown('</div>', unsafe_allow_html=True)
-            ready = bool(openai_key)
-            if st.button("Hazır mı?"):
-                st.session_state["conn"] = {"provider": provider, "OPENAI_API_KEY": openai_key, "model": model}
-                st.success("Bağlantı bilgileri kaydedildi.")
-        elif provider == Provider.AZURE:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            az_key = st.text_input("AZURE_OPENAI_API_KEY", type="password", value="")
-            az_ep  = st.text_input("AZURE_OPENAI_ENDPOINT", value="", placeholder="https://<resource>.openai.azure.com/")
-            az_ver = st.text_input("AZURE_OPENAI_API_VERSION", value="2024-10-21")
-            deployment = st.text_input("Deployment name", value="gpt-4o-mini")
-            st.markdown('</div>', unsafe_allow_html=True)
-            ready = bool(az_key and az_ep and az_ver and deployment)
-            if st.button("Hazır mı?"):
-                st.session_state["conn"] = {"provider": provider, "AZURE_OPENAI_API_KEY": az_key, "AZURE_OPENAI_ENDPOINT": az_ep, "AZURE_OPENAI_API_VERSION": az_ver, "deployment": deployment}
-                st.success("Bağlantı bilgileri kaydedildi.")
-        else:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            gemini_key = st.text_input("GEMINI (GOOGLE_API_KEY)", type="password", value="")
-            gemini_model = st.selectbox("Gemini modeli", ["gemini-1.5-flash","gemini-1.5-pro"], index=0)
-            st.markdown('</div>', unsafe_allow_html=True)
-            ready = bool(gemini_key)
-            if st.button("Hazır mı?"):
-                st.session_state["conn"] = {"provider": provider, "GEMINI_API_KEY": gemini_key, "gemini_model": gemini_model}
-                st.success("Bağlantı bilgileri kaydedildi.")
+    if provider == "OpenAI":
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        openai_key = st.text_input("OPENAI_API_KEY", type="password", value="")
+        model = st.selectbox("Model", ["gpt-4o","gpt-4o-mini"], index=1)
+        st.markdown('</div>', unsafe_allow_html=True)
+        if st.button("Hazır mı?"): st.session_state["conn"] = {"provider": provider, "OPENAI_API_KEY": openai_key, "model": model}; st.success("Kaydedildi.")
+    elif provider == "Azure OpenAI":
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        az_key = st.text_input("AZURE_OPENAI_API_KEY", type="password", value="")
+        az_ep  = st.text_input("AZURE_OPENAI_ENDPOINT", value="", placeholder="https://<resource>.openai.azure.com/")
+        az_ver = st.text_input("AZURE_OPENAI_API_VERSION", value="2024-10-21")
+        deployment = st.text_input("Deployment name", value="gpt-4o-mini")
+        st.markdown('</div>', unsafe_allow_html=True)
+        if st.button("Hazır mı?"): st.session_state["conn"] = {"provider": provider, "AZURE_OPENAI_API_KEY": az_key, "AZURE_OPENAI_ENDPOINT": az_ep, "AZURE_OPENAI_API_VERSION": az_ver, "deployment": deployment}; st.success("Kaydedildi.")
+    else:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        gemini_key = st.text_input("GEMINI (GOOGLE_API_KEY)", type="password", value="")
+        # Önerilen model isimleri (v1beta/v1 ile uyumlu): -001 suffix
+        gemini_model = st.selectbox("Gemini modeli", ["gemini-1.5-flash-001","gemini-1.5-pro-001"], index=0)
+        st.markdown('</div>', unsafe_allow_html=True)
+        if st.button("Hazır mı?"): st.session_state["conn"] = {"provider": provider, "GEMINI_API_KEY": gemini_key, "gemini_model": gemini_model}; st.success("Kaydedildi.")
 
     st.info("Devam etmeden önce yukarıda **Hazır mı?** butonuna basarak bağlantı bilgilerini kaydedin.")
 
 with tabs[1]:
     st.subheader("Yükleme ve Analiz")
-    if "conn" not in st.session_state:
-        st.warning("Önce 'Bağlantı' sekmesinde bilgileri kaydedin.")
-        st.stop()
+    if "conn" not in st.session_state: st.warning("Önce 'Bağlantı' sekmesinde bilgileri kaydedin."); st.stop()
+    c1,c2,c3,c4 = st.columns([1,1,1,1])
+    with c1: detail = st.selectbox("Detay seviyesi", ["çok yüksek","yüksek","orta"], index=1)
+    with c2: lang = st.selectbox("Dil", ["TR","EN"], index=0)
+    with c3: template_key = st.selectbox("Şablon", ["Genel","Satış Performansı","Pazarlama Kampanyası","Finans Raporu","IT Operasyonları"], index=0)
+    with c4: max_files = st.slider("Maks. dosya", 1, 10, 3)
 
-    # Ayarlar barı (kompakt)
-    c1, c2, c3, c4 = st.columns([1,1,1,1])
-    with c1:
-        detail = st.selectbox("Detay seviyesi", ["çok yüksek","yüksek","orta"], index=1)
-    with c2:
-        lang = st.selectbox("Dil", ["TR","EN"], index=0)
-    with c3:
-        template_key = st.selectbox("Şablon", ["Genel","Satış Performansı","Pazarlama Kampanyası","Finans Raporu","IT Operasyonları"], index=0)
-    with c4:
-        max_files = st.slider("Maks. dosya", 1, 10, 3)
-
-    # Yükleme alanı
     colU, colR = st.columns([1,1])
     with colU:
-        uploaded_files = st.file_uploader(
-            "Dosya yükleyin (PNG/JPG, PDF, CSV/TSV, XLSX/XLS, Parquet)",
-            type=["png","jpg","jpeg","pdf","csv","tsv","xlsx","xls","parquet"],
-            accept_multiple_files=True
-        )
+        uploaded_files = st.file_uploader("Dosya yükleyin (PNG/JPG, PDF, CSV/TSV, XLSX/XLS, Parquet)",
+                                          type=["png","jpg","jpeg","pdf","csv","tsv","xlsx","xls","parquet"],
+                                          accept_multiple_files=True)
     with colR:
         url_input = st.text_input("Veya dosya URL'si", placeholder="https://... (.png/.jpg/.pdf/.csv/.xlsx/.parquet)")
         order_url_pos = st.selectbox("URL dosyasının sırası", ["En sonda","En başta"], index=0)
 
     custom_template = st.text_area("Özel talimatlar (opsiyonel)", height=100, placeholder="Ek bağlam/amaç/KPI vb.")
 
-    if "analyses" not in st.session_state:
-        st.session_state["analyses"] = []
-    if "chat" not in st.session_state:
-        st.session_state["chat"] = {}
+    if "analyses" not in st.session_state: st.session_state["analyses"] = []
+    if "chat" not in st.session_state: st.session_state["chat"] = {}
 
     if st.button("🚀 Analizi Başlat", type="primary"):
-        # Build client per provider
-        conn = st.session_state["conn"]
-        prov = conn["provider"]
-        if prov == Provider.OPENAI:
+        conn = st.session_state["conn"]; prov = conn["provider"]
+        if prov == "OpenAI":
             if OpenAI is None: st.error("openai paketi kurulu değil."); st.stop()
             client_obj = OpenAI(api_key=conn["OPENAI_API_KEY"]); model_name = conn["model"]
-        elif prov == Provider.AZURE:
+        elif prov == "Azure OpenAI":
             if AzureOpenAI is None: st.error("openai paketi kurulu değil."); st.stop()
-            client_obj = AzureOpenAI(api_key=conn["AZURE_OPENAI_API_KEY"],
-                                     azure_endpoint=conn["AZURE_OPENAI_ENDPOINT"],
-                                     api_version=conn["AZURE_OPENAI_API_VERSION"])
-            model_name = conn["deployment"]
+            client_obj = AzureOpenAI(api_key=conn["AZURE_OPENAI_API_KEY"], azure_endpoint=conn["AZURE_OPENAI_ENDPOINT"], api_version=conn["AZURE_OPENAI_API_VERSION"]); model_name = conn["deployment"]
         else:
             if genai is None: st.error("google-generativeai paketi kurulu değil."); st.stop()
-            genai.configure(api_key=conn["GEMINI_API_KEY"])
-            client_obj = genai.GenerativeModel(conn["gemini_model"]); model_name = conn["gemini_model"]
+            genai.configure(api_key=conn["GEMINI_API_KEY"]); client_obj = genai.GenerativeModel(conn["gemini_model"]); model_name = conn["gemini_model"]
 
         files_to_process: List[Tuple[int,str,bytes,str]] = []
         if uploaded_files:
@@ -364,10 +317,7 @@ with tabs[1]:
             fetched = fetch_from_url(url_input.strip())
             if fetched:
                 mime, data = fetched
-                if order_url_pos == "En başta":
-                    files_to_process.insert(0, (-1, "from_url", data, mime))
-                else:
-                    files_to_process.append((len(files_to_process), "from_url", data, mime))
+                files_to_process.insert(0 if order_url_pos=="En başta" else len(files_to_process), (-1, "from_url", data, mime))
             else:
                 st.error("URL indirilemedi veya dosya tipi desteklenmiyor.")
 
@@ -388,16 +338,12 @@ with tabs[1]:
                     st.write(f"**{i}/{total}** · {file_name} işleniyor…")
                     try:
                         if mime in ("image/png","image/jpeg"):
-                            try:
-                                st.image(Image.open(io.BytesIO(file_bytes)), caption=file_name, use_column_width=True)
-                            except Exception:
-                                pass
+                            try: st.image(Image.open(io.BytesIO(file_bytes)), caption=file_name, use_column_width=True)
+                            except Exception: pass
                             text = call_on_image(prov, client_obj, model_name, instructions, file_bytes, mime)
                         elif mime == "application/pdf":
                             text = call_on_pdf(prov, client_obj, model_name, instructions, file_name if file_name!="from_url" else "from_url.pdf", file_bytes)
-                        elif mime in ("text/csv","text/tsv",
-                                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                      "application/parquet") or file_name.lower().endswith((".csv",".tsv",".xlsx",".xls",".parquet")):
+                        elif mime in ("text/csv","text/tsv","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/parquet") or file_name.lower().endswith((".csv",".tsv",".xlsx",".xls",".parquet")):
                             try:
                                 df = read_table_file(file_name, file_bytes, mime)
                                 st.dataframe(_limit_df(df, 10, 20), use_container_width=True)
@@ -407,8 +353,7 @@ with tabs[1]:
                             table_prompt = dataframe_to_prompt(df, file_name, low_cost=low_cost)
                             text = call_on_table(prov, client_obj, model_name, instructions, table_prompt)
                         else:
-                            st.error(f"{file_name}: Desteklenmeyen MIME tipi ({mime}).")
-                            continue
+                            st.error(f"{file_name}: Desteklenmeyen MIME tipi ({mime})."); continue
 
                         data = safe_json_extract(text)
                         analysis_id = str(int(time.time()*1000))
@@ -422,16 +367,13 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Sonuçlar & Takip Soruları")
     if "analyses" not in st.session_state or not st.session_state["analyses"]:
-        st.info("Henüz analiz yok. 'Yükle & Çalıştır' sekmesinden başlayın.")
-        st.stop()
+        st.info("Henüz analiz yok. 'Yükle & Çalıştır' sekmesinden başlayın."); st.stop()
 
-    # Active selection
     options = [f"{a['name']} (id:{a['id']})" for a in st.session_state["analyses"]]
     chosen = st.selectbox("Aktif analiz", options, index=len(options)-1)
     active_id = st.session_state["analyses"][options.index(chosen)]["id"]
     active = next(a for a in st.session_state["analyses"] if a["id"]==active_id)
 
-    # Cards layout
     colL, colR = st.columns([2,1], gap="large")
     with colL:
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -443,19 +385,16 @@ with tabs[2]:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("#### 💬 Takip Soruları")
         for m in st.session_state["chat"][active_id]:
-            with st.chat_message("assistant" if m["role"]=="assistant" else "user"):
-                st.markdown(m["text"])
+            with st.chat_message("assistant" if m["role"]=="assistant" else "user"): st.markdown(m["text"])
         user_q = st.chat_input("Bu rapor hakkında sorunuzu yazın…")
         if user_q:
             st.session_state["chat"][active_id].append({"role":"user","text":user_q})
             with st.chat_message("user"): st.markdown(user_q)
-            conn = st.session_state.get("conn", {})
-            prov = conn.get("provider")
-            # Build client again (stateless güvenli)
+            conn = st.session_state.get("conn", {}); prov = conn.get("provider")
             try:
-                if prov == Provider.OPENAI:
+                if prov == "OpenAI":
                     client_obj = OpenAI(api_key=conn["OPENAI_API_KEY"]); model_name = conn["model"]
-                elif prov == Provider.AZURE:
+                elif prov == "Azure OpenAI":
                     client_obj = AzureOpenAI(api_key=conn["AZURE_OPENAI_API_KEY"], azure_endpoint=conn["AZURE_OPENAI_ENDPOINT"], api_version=conn["AZURE_OPENAI_API_VERSION"]); model_name = conn["deployment"]
                 else:
                     genai.configure(api_key=conn["GEMINI_API_KEY"]); client_obj = genai.GenerativeModel(conn["gemini_model"]); model_name = conn["gemini_model"]
@@ -469,34 +408,23 @@ with tabs[2]:
     with colR:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('#### 🧾 JSON <span class="badge">makine-okur</span>', unsafe_allow_html=True)
-        if active["json"] is not None:
-            st.json(active["json"], expanded=False)
-        else:
-            st.warning("Geçerli JSON algılanamadı.")
+        if active["json"] is not None: st.json(active["json"], expanded=False)
+        else: st.warning("Geçerli JSON algılanamadı.")
         st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("#### 📊 KPI / Grafik")
-        j = active["json"] or {}
-        metrics = j.get("metrics") or []
-        rows = []
+        j = active["json"] or {}; metrics = j.get("metrics") or []; rows = []
         for m in metrics:
             name = m.get("name","")
-            try:
-                value = float(str(m.get("value","")).replace("%","").replace(",","").strip())
-            except Exception:
-                value = None
-            if name and value is not None:
-                rows.append((name, value))
+            try: value = float(str(m.get("value","")).replace("%","").replace(",","").strip())
+            except Exception: value = None
+            if name and value is not None: rows.append((name, value))
         if rows:
-            names = [r[0] for r in rows][:30]
-            vals  = [r[1] for r in rows][:30]
-            fig = plt.figure()
-            plt.bar(range(len(vals)), vals)
+            names = [r[0] for r in rows][:30]; vals  = [r[1] for r in rows][:30]
+            fig = plt.figure(); plt.bar(range(len(vals)), vals)
             plt.xticks(range(len(names)), names, rotation=45, ha="right")
-            plt.title("JSON -> Metrikler")
-            plt.tight_layout()
-            st.pyplot(fig)
+            plt.title("JSON -> Metrikler"); plt.tight_layout(); st.pyplot(fig)
         else:
             st.info("Sayısal metrik bulunamadı.")
         st.markdown('</div>', unsafe_allow_html=True)
@@ -509,18 +437,10 @@ with tabs[2]:
                 df = pd.DataFrame(rows); avail = [c for c in columns if c in df.columns]
                 return df[avail] if avail else df
             def csv_bytes_from_df(df): return df.to_csv(index=False).encode("utf-8")
-            sections = {
-                "metrics": ["name","value","unit"],
-                "anomalies": ["title","where","why"],
-                "trends": ["signal","metric","confidence"],
-                "quality_flags": ["issue","severity"],
-                "recommendations": ["title","impact","effort","steps"],
-            }
+            sections = {"metrics":["name","value","unit"],"anomalies":["title","where","why"],"trends":["signal","metric","confidence"],"quality_flags":["issue","severity"],"recommendations":["title","impact","effort","steps"]}
             for sec, cols in sections.items():
-                rows = active["json"].get(sec) or []
-                df = df_from_list_of_dicts(rows, cols)
-                if df is not None:
-                    st.download_button(f"{sec}.csv", data=csv_bytes_from_df(df), file_name=f"{sec}.csv", mime="text/csv", use_container_width=True)
+                rows = active["json"].get(sec) or []; df = df_from_list_of_dicts(rows, cols)
+                if df is not None: st.download_button(f"{sec}.csv", data=csv_bytes_from_df(df), file_name=f"{sec}.csv", mime="text/csv", use_container_width=True)
             st.download_button("Rapor (Markdown)", data=active["text"], file_name=f"{active['name']}_analysis.md", mime="text/markdown", use_container_width=True)
         else:
             st.info("JSON verisi yok.")
