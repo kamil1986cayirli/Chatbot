@@ -1,25 +1,25 @@
-# Deploy — Streamlit Cloud (v5.3 Cloud Pack)
+# Deploy — Streamlit Cloud (v5.4, Azure destekli)
 
-## 1) Repo hazırlığı
-- Bu klasörü bir Git repo olarak yayınlayın (GitHub, GitLab).
-- `app.py`, `requirements.txt`, `.streamlit/config.toml` dosyaları yeterli.
+## 1) Repo
+- Bu klasörü GitHub'a yükleyin.
+- Dosyalar: `app.py`, `requirements.txt`, `.streamlit/config.toml`, `.streamlit/secrets.toml.example`
 
 ## 2) Streamlit Cloud
-- https://streamlit.io/cloud > **New app** > repoyu seçin.
-- **Main file path**: `app.py`
+- New app → repo + branch → main file `app.py`
 
 ## 3) Secrets
-- App > **Settings** > **Secrets** bölümüne aşağıdakini girin:
+- App → Settings → Secrets:
 ```
-OPENAI_API_KEY="sk-..."
+AZURE_OPENAI_API_KEY="..."
+AZURE_OPENAI_ENDPOINT="https://<resource>.openai.azure.com/"
+AZURE_OPENAI_API_VERSION="2024-10-21"
 ```
-(İsterseniz Azure OpenAI için endpoint/key de ekleyin.)
+(Gerekirse OPENAI_API_KEY de ekleyin.)
 
-## 4) Çalıştırma
-- Deploy tamamlanınca linki paylaşın.
-- Kullanıcılar sol menüde anahtar girmek zorunda kalmadan (Secrets ile) hazır çalışır.
+## 4) BO (opsiyonel)
+- SAP BO PoC'yi `/bo` alt klasörü ile ekleyebiliriz (OpenDocument embed + REST export).
 
 ## Sorun giderme
-- Python bağımlılık: `requirements.txt`
-- Bellek hatası: Çok büyük dosyalarda tablo özetleyici limiti artırmayın (varsayılan 100 satır/50 sütun).
-- OpenAI hatası: Key yanlış/limit dolmuş olabilir; loglarda HTTP 401/429 görünür.
+- 401/403: Azure rol/yetki – anahtar ve endpoint'i kontrol edin.
+- 429: Rate limit – düşük maliyet kip + dosya/adım sınırı.
+- PDF upload: Azure Responses API destekler; file purpose `assistants` kullanın.

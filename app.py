@@ -1,4 +1,4 @@
-# app.py (v5.3 Cloud Pack) — Görsel/PDF/CSV/Excel/Parquet analizi + Q&A + KPI + Sıralı analiz
+# app.py (v5.4) — OpenAI / Azure OpenAI seçilebilir; Görsel/PDF/CSV/Excel/Parquet + Q&A + KPI + Sıralı analiz
 import os, io, re, json, base64, time
 from typing import Optional, Dict, Any, List
 
@@ -7,9 +7,11 @@ from PIL import Image
 import requests
 import matplotlib.pyplot as plt
 import pandas as pd
-from openai import OpenAI
 
-st.set_page_config(page_title="Dashboard & Rapor Analizörü — v5.3", page_icon="🧠", layout="wide")
+# OpenAI & AzureOpenAI client sınıfları
+from openai import OpenAI, AzureOpenAI
+
+st.set_page_config(page_title="Dashboard & Rapor Analizörü — v5.4", page_icon="🧠", layout="wide")
 
 # ---------- HELPERS ----------
 def b64_from_image_bytes(img_bytes: bytes, mime: str) -> str:
@@ -32,7 +34,7 @@ def safe_json_extract(text: str) -> Optional[Dict[str, Any]]:
             return None
     return None
 
-def build_instructions(detail_level: str, language: str, template_key: str, custom_template: str) -> str:
+def build_instructions(detail_level: str, language: str, template_key: str, custom_template: str, low_cost: bool=False) -> str:
     base = f"""
     Sen üst düzey bir iş analisti ve veri görselleştirme uzmanısın.
     Görev: Kullanıcının yüklediği dashboard görseli, matbu rapor veya tablo dosyasını EN İNCE DETAYINA kadar incele ve aşağıdaki formatla yanıt ver.
@@ -76,47 +78,71 @@ def build_instructions(detail_level: str, language: str, template_key: str, cust
     base = re.sub(r"\n[ \t]+", "\n", base).strip()
     extra = templates.get(template_key, "")
     custom = custom_template.strip() if custom_template else ""
+    if low_cost:
+        base += "\n\nKısıt: Token tasarrufu yap. Maddeleri kısa tut, yalnızca en kritik bulguları ver."
     full = base + "\n\n" + extra + ("\n" + custom if custom else "")
     return full
 
-def call_openai_on_image(client: "OpenAI", model: str, prompt: str, image_bytes: bytes, mime: str) -> str:
-    data_url = b64_from_image_bytes(image_bytes, mime)
-    response = client.responses.create(
+# --- Retry sarmalayıcı (429 vs) ---
+def _safe_responses_create(client, **kwargs):
+    backoff = [1, 2, 4, 8]
+    last_err = None
+    for wait in [0] + backoff:
+        if wait:
+            time.sleep(wait)
+        try:
+            return client.responses.create(**kwargs)
+        except Exception as e:
+            msg = str(e)
+            if "rate limit" in msg.lower() or "requests per" in msg.lower():
+                last_err = e
+                continue
+            if "insufficient_quota" in msg.lower() or "you exceeded your current quota" in msg.lower():
+                st.error("Sağlayıcı: Bakiye/limit aşıldı (insufficient_quota). Plan/billing’i kontrol edin.")
+                raise
+            raise
+    st.warning("Geçici rate limit. Biraz sonra tekrar deneyin.")
+    if last_err:
+        raise last_err
+
+# ---------- MODEL CALLS (Responses API tercih; Azure destekli) ----------
+def call_on_image(client, model: str, prompt: str, image_bytes: bytes, mime: str) -> str:
+    data_url = f"data:{mime};base64," + base64.b64encode(image_bytes).decode("utf-8")
+    response = _safe_responses_create(
+        client,
         model=model,
         instructions=prompt,
-        input=[
-            {"role": "user", "content": [
-                {"type": "input_text", "text": "Bu görseldeki dashboard/raporu ayrıntılı analiz et."},
-                {"type": "input_image", "image_url": {"url": data_url}},
-            ]}
-        ],
+        input=[{"role": "user", "content": [
+            {"type": "input_text", "text": "Bu görseldeki dashboard/raporu ayrıntılı analiz et."},
+            {"type": "input_image", "image_url": {"url": data_url}},
+        ]}],
     )
     return getattr(response, "output_text", None) or response.output[0].content[0].text
 
-def call_openai_on_file(client: "OpenAI", model: str, prompt: str, file_name: str, file_bytes: bytes) -> str:
-    # IMPORTANT: purpose="assistants" (Responses API ile uyumlu)
+def call_on_pdf_file(client, model: str, prompt: str, file_name: str, file_bytes: bytes) -> str:
+    # Azure Responses API PDF destekler; purpose=user_data desteklenmez, assistants kullanın.
     uploaded = client.files.create(file=(file_name, io.BytesIO(file_bytes)), purpose="assistants")
-    response = client.responses.create(
+    response = _safe_responses_create(
+        client,
         model=model,
         instructions=prompt,
-        input=[
-            {"role": "user", "content": [
-                {"type": "input_file", "file_id": uploaded.id},
-                {"type": "input_text", "text": "Bu dosyadaki içeriği (PDF/rapor) ayrıntılı analiz et."},
-            ]}
-        ],
+        input=[{"role": "user", "content": [
+            {"type": "input_file", "file_id": uploaded.id},
+            {"type": "input_text", "text": "Bu dosyadaki içeriği (PDF/rapor) ayrıntılı analiz et."},
+        ]}],
     )
     return getattr(response, "output_text", None) or response.output[0].content[0].text
 
-def call_openai_on_table(client: "OpenAI", model: str, prompt: str, table_prompt: str) -> str:
-    response = client.responses.create(
+def call_on_table_text(client, model: str, prompt: str, table_prompt: str) -> str:
+    response = _safe_responses_create(
+        client,
         model=model,
         instructions=prompt,
         input=[{"role": "user", "content": [{"type": "input_text", "text": table_prompt}]}],
     )
     return getattr(response, "output_text", None) or response.output[0].content[0].text
 
-def call_openai_qa(client: "OpenAI", model: str, analysis_text: str, history: List[dict], user_question: str, lang: str) -> str:
+def call_for_qa(client, model: str, analysis_text: str, history: List[dict], user_question: str, lang: str) -> str:
     hist_text = ""
     for m in history[-10:]:
         role = "Kullanıcı" if m["role"] == "user" else "Asistan"
@@ -134,13 +160,15 @@ def call_openai_qa(client: "OpenAI", model: str, analysis_text: str, history: Li
     Cevap dili: {'Türkçe' if lang=='TR' else 'English'}.
     Yanıtın kısa, net ve mühendisçe olsun. Gerekirse maddeler kullan.
     """
-    response = client.responses.create(
+    response = _safe_responses_create(
+        client,
         model=model,
         instructions="Analizdeki bilgiye sadık kal. Belirsizse varsayım yapmadan 'emin değilim' de.",
         input=[{"role": "user", "content": [{"type": "input_text", "text": qa_prompt}]}],
     )
     return getattr(response, "output_text", None) or response.output[0].content[0].text
 
+# ---------- File & Data utilities ----------
 def fetch_from_url(url: str) -> Optional[tuple]:
     try:
         r = requests.get(url, timeout=30)
@@ -148,55 +176,45 @@ def fetch_from_url(url: str) -> Optional[tuple]:
         content_type = (r.headers.get("Content-Type") or "").lower()
         data = r.content
         u = url.lower()
-
-        # PDF & Görseller
-        if "pdf" in content_type or u.endswith(".pdf"):
-            return ("application/pdf", data)
-        if "png" in content_type or u.endswith(".png"):
-            return ("image/png", data)
-        if "jpeg" in content_type or "jpg" in content_type or u.endswith((".jpg",".jpeg")):
-            return ("image/jpeg", data)
-
-        # Tablo dosyaları
-        if "text/csv" in content_type or u.endswith(".csv"):
-            return ("text/csv", data)
-        if "text/tab-separated-values" in content_type or u.endswith(".tsv"):
-            return ("text/tsv", data)
+        if "pdf" in content_type or u.endswith(".pdf"): return ("application/pdf", data)
+        if "png" in content_type or u.endswith(".png"): return ("image/png", data)
+        if "jpeg" in content_type or "jpg" in content_type or u.endswith((".jpg",".jpeg")): return ("image/jpeg", data)
+        if "text/csv" in content_type or u.endswith(".csv"): return ("text/csv", data)
+        if "text/tab-separated-values" in content_type or u.endswith(".tsv"): return ("text/tsv", data)
         if "spreadsheet" in content_type or "sheet" in content_type or u.endswith((".xlsx",".xls")):
             return ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
-        if "parquet" in content_type or u.endswith(".parquet"):
-            return ("application/parquet", data)
-
+        if "parquet" in content_type or u.endswith(".parquet"): return ("application/parquet", data)
         return None
     except Exception:
         return None
 
 def _limit_df(df: pd.DataFrame, max_rows: int = 100, max_cols: int = 50) -> pd.DataFrame:
     df2 = df.copy()
-    if df2.shape[1] > max_cols:
-        df2 = df2.iloc[:, :max_cols]
-    if df2.shape[0] > max_rows:
-        df2 = df2.iloc[:max_rows, :]
+    if df2.shape[1] > max_cols: df2 = df2.iloc[:, :max_cols]
+    if df2.shape[0] > max_rows: df2 = df2.iloc[:max_rows, :]
     return df2
 
-def dataframe_to_prompt(df: pd.DataFrame, file_name: str) -> str:
-    df_limited = _limit_df(df)
-    schema_lines = [f"- {c}: {str(df[c].dtype)}" for c in df_limited.columns]
+def dataframe_to_prompt(df: pd.DataFrame, file_name: str, low_cost: bool=False) -> str:
+    df_limited = df.head(50) if low_cost else _limit_df(df)
+    schema_lines = [f"- {c}: {str(df[c].dtype)}" for c in df_limited.columns[: (10 if low_cost else 50)]]
     try:
-        preview = df_limited.head(10).to_markdown(index=False)
+        preview = df_limited.head(5 if low_cost else 10).to_markdown(index=False)
     except Exception:
-        preview = df_limited.head(10).to_csv(index=False)
-    try:
-        stats = df_limited.describe(include='all').transpose().fillna("").to_markdown()
-    except Exception:
-        stats = "(istatistik üretilemedi)"
+        preview = df_limited.head(5 if low_cost else 10).to_csv(index=False)
+    if low_cost:
+        stats = "(istatistik hesaplanmadı — düşük maliyet modu)"
+    else:
+        try:
+            stats = df_limited.describe(include='all').transpose().fillna("").to_markdown()
+        except Exception:
+            stats = "(istatistik üretilemedi)"
     return (
         f"Dosya adı: {file_name}\n"
         f"Satır x Sütun: {df.shape[0]} x {df.shape[1]}\n\n"
         f"Şema:\n" + "\n".join(schema_lines) + "\n\n"
-        f"İlk 10 satır:\n{preview}\n\n"
-        f"Temel istatistikler (sınırlı):\n{stats}\n"
-        f"\nYukarıdaki tablo özetini, verilen talimatlarla birlikte ayrıntılı analiz et."
+        f"İlk satırlar:\n{preview}\n\n"
+        f"Temel istatistikler:\n{stats}\n"
+        f"\nYukarıdaki tablo özetini, verilen talimatlarla birlikte {'kısa ve öz' if low_cost else 'ayrıntılı'} analiz et."
     )
 
 def read_table_file(file_name: str, file_bytes: bytes, mime: str) -> pd.DataFrame:
@@ -210,20 +228,35 @@ def read_table_file(file_name: str, file_bytes: bytes, mime: str) -> pd.DataFram
         return pd.read_excel(buf)
     if "parquet" in mime or lname.endswith(".parquet"):
         return pd.read_parquet(buf)  # pyarrow gerekir
-    # Son çare: csv dene
     return pd.read_csv(buf)
 
 # ---------- UI ----------
-st.title("🧠 Dashboard & Rapor Analizörü (v5.3)")
-st.caption("Analiz + Q&A • Şablonlar • CSV/Excel/Parquet • KPI • Sıralı analiz + ilerleme çubuğu")
+st.title("🧠 Dashboard & Rapor Analizörü (v5.4)")
+st.caption("OpenAI/Azure seçilebilir • Görsel/PDF/CSV/Excel/Parquet • Q&A • KPI • Sıralı analiz + ilerleme çubuğu")
 
-# Secrets/Env otomatik doldurma
-default_api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-
+# Sağlayıcı seçimi
 st.sidebar.title("⚙️ Ayarlar")
-api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=default_api_key)
-model = st.sidebar.selectbox("Model", ["gpt-4o", "gpt-4o-mini"])
-detail = st.sidebar.selectbox("Detay seviyesi", ["çok yüksek", "yüksek", "orta"])
+provider = st.sidebar.radio("Sağlayıcı", ["OpenAI", "Azure OpenAI"], index=1)
+low_cost = st.sidebar.toggle("🔋 Düşük maliyet/limit dostu kip", value=True)
+
+if provider == "OpenAI":
+    default_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=default_key)
+    # Model adları (OpenAI)
+    model = st.sidebar.selectbox("Model", ["gpt-4o", "gpt-4o-mini"], index=1)
+    client = OpenAI(api_key=api_key)
+else:
+    default_key = st.secrets.get("AZURE_OPENAI_API_KEY", os.getenv("AZURE_OPENAI_API_KEY", ""))
+    default_ep  = st.secrets.get("AZURE_OPENAI_ENDPOINT", os.getenv("AZURE_OPENAI_ENDPOINT", ""))
+    default_ver = st.secrets.get("AZURE_OPENAI_API_VERSION", os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"))
+    api_key = st.sidebar.text_input("AZURE_OPENAI_API_KEY", type="password", value=default_key)
+    azure_endpoint = st.sidebar.text_input("AZURE_OPENAI_ENDPOINT", value=default_ep, placeholder="https://<resource>.openai.azure.com/")
+    api_version = st.sidebar.text_input("AZURE_OPENAI_API_VERSION", value=default_ver)
+    # Azure'da 'model' alanına deployment adı verilir
+    model = st.sidebar.text_input("Deployment name (ör. gpt-4o, gpt-4o-mini)", value="gpt-4o-mini")
+    client = AzureOpenAI(api_key=api_key, api_version=api_version, azure_endpoint=azure_endpoint)
+
+detail = st.sidebar.selectbox("Detay seviyesi", ["çok yüksek", "yüksek", "orta"], index=1)
 lang = st.sidebar.selectbox("Çıktı dili", ["TR", "EN"], index=0)
 
 st.sidebar.markdown("---")
@@ -258,17 +291,15 @@ kpi_targets = parse_kpi_targets(kpi_txt)
 st.sidebar.markdown("---")
 order_url_pos = st.sidebar.selectbox("URL dosyasının sırası", ["En sonda", "En başta"], index=0)
 default_active_choice = st.sidebar.selectbox("Varsayılan aktif analiz", ["Son", "İlk"], index=0)
+max_files = st.sidebar.slider("Aynı anda en fazla analiz edilecek dosya", 1, 10, 3)
 
-if not api_key:
-    st.info("Sol menüden bir OpenAI API anahtarı girilmeli (veya Secrets'a eklenmeli).")
-    st.stop()
-
-client = OpenAI(api_key=api_key)
-
-if "analyses" not in st.session_state:
-    st.session_state["analyses"] = []  # list of dicts: {id, name, text, json}
-if "chat" not in st.session_state:
-    st.session_state["chat"] = {}      # analysis_id -> [{"role","text"}]
+if not (provider == "OpenAI" and st.secrets.get("OPENAI_API_KEY")) and not (provider == "Azure OpenAI" and st.secrets.get("AZURE_OPENAI_API_KEY")):
+    if provider == "OpenAI" and not api_key:
+        st.info("Sol menüden bir OpenAI API anahtarı girilmeli (veya Secrets'a eklenmeli).")
+        st.stop()
+    if provider == "Azure OpenAI" and (not api_key or not azure_endpoint):
+        st.info("AZURE_OPENAI_API_KEY ve AZURE_OPENAI_ENDPOINT gerekli.")
+        st.stop()
 
 st.subheader("1) Dosya yükleyin veya URL verin")
 colu, colv = st.columns([1,1])
@@ -286,12 +317,10 @@ user_notes = st.text_area("Notlar/Hedefler (opsiyonel)", height=100)
 if st.button("Analizi Başlat", type="primary"):
     files_to_process = []
 
-    # 1) Kullanıcının seçtiği sırayı koru
     if uploaded_files:
         for idx, f in enumerate(uploaded_files):
             files_to_process.append((idx, f.name, f.read(), f.type))
 
-    # 2) URL dosyasını seçilen yere yerleştir
     if url_input:
         fetched = fetch_from_url(url_input.strip())
         if fetched:
@@ -306,33 +335,35 @@ if st.button("Analizi Başlat", type="primary"):
     if not files_to_process:
         st.warning("Lütfen en az bir dosya seçin veya geçerli bir URL girin.")
     else:
-        instructions = build_instructions(detail, lang, template_key, custom_template)
+        if len(files_to_process) > max_files:
+            st.info(f"{len(files_to_process)} dosya seçildi, limit {max_files}. İlk {max_files} dosya analiz edilecek.")
+            files_to_process = files_to_process[:max_files]
+
+        if low_cost and detail == "çok yüksek":
+            detail = "orta"
+
+        instructions = build_instructions(detail, lang, template_key, custom_template, low_cost=low_cost)
         if user_notes:
             instructions += f"\n\nKullanıcı notları/bağlam: {user_notes}\n"
 
-        # 3) Sırayı kesinleştir
         files_to_process.sort(key=lambda x: x[0])
-
         total = len(files_to_process)
         progress = st.progress(0.0)
 
         for i, (order, file_name, file_bytes, mime) in enumerate(files_to_process, start=1):
             with st.spinner(f"{i}/{total} {file_name} analiz ediliyor..."):
                 try:
-                    # --- GÖRSEL ---
                     if mime in ("image/png", "image/jpeg"):
                         try:
                             img = Image.open(io.BytesIO(file_bytes))
                             st.image(img, caption=file_name, use_column_width=True)
                         except Exception:
                             pass
-                        text = call_openai_on_image(client, model, instructions, file_bytes, mime)
+                        text = call_on_image(client, model, instructions, file_bytes, mime)
 
-                    # --- PDF ---
                     elif mime == "application/pdf":
-                        text = call_openai_on_file(client, model, instructions, file_name if file_name!="from_url" else "from_url.pdf", file_bytes)
+                        text = call_on_pdf_file(client, model, instructions, file_name if file_name!="from_url" else "from_url.pdf", file_bytes)
 
-                    # --- TABLO DOSYALARI ---
                     elif mime in ("text/csv", "text/tsv",
                                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                   "application/parquet") or file_name.lower().endswith((".csv",".tsv",".xlsx",".xls",".parquet")):
@@ -344,8 +375,8 @@ if st.button("Analizi Başlat", type="primary"):
                             st.error(f"{file_name}: Tablo okunamadı. Hata: {e}")
                             progress.progress(i/total)
                             continue
-                        table_prompt = dataframe_to_prompt(df, file_name)
-                        text = call_openai_on_table(client, model, instructions, table_prompt)
+                        table_prompt = dataframe_to_prompt(df, file_name, low_cost=low_cost)
+                        text = call_on_table_text(client, model, instructions, table_prompt)
 
                     else:
                         st.error(f"{file_name}: Desteklenmeyen MIME tipi ({mime}).")
@@ -354,24 +385,20 @@ if st.button("Analizi Başlat", type="primary"):
 
                     data = safe_json_extract(text)
                     analysis_id = str(int(time.time()*1000))
+                    if "analyses" not in st.session_state: st.session_state["analyses"] = []
                     st.session_state["analyses"].append({
-                        "id": analysis_id,
-                        "name": file_name,
-                        "text": text,
-                        "json": data,
+                        "id": analysis_id, "name": file_name, "text": text, "json": data,
                     })
-                    if "chat" not in st.session_state:
-                        st.session_state["chat"] = {}
+                    if "chat" not in st.session_state: st.session_state["chat"] = {}
                     st.session_state["chat"][analysis_id] = []
-
                     st.success(f"{file_name} ✅ ( {i}/{total} )")
                 except Exception as e:
                     st.exception(e)
 
             progress.progress(i/total)
 
-# If we have analyses, let user pick one to review + chat
-if st.session_state["analyses"]:
+# 2) Çıktılar + Q&A
+if st.session_state.get("analyses"):
     st.subheader("2) Analizi görüntüleyin ve aynı pencerede soru sorun")
     options = [f"{a['name']} (id:{a['id']})" for a in st.session_state["analyses"]]
     default_idx = (len(options)-1) if default_active_choice=="Son" else 0
@@ -390,12 +417,10 @@ if st.session_state["analyses"]:
         else:
             st.warning("Geçerli JSON algılanamadı. Ham çıktıya bakın.")
     with tabs[2]:
-        # JSON->Bar chart
         metrics = (active["json"] or {}).get("metrics") if active["json"] else []
         rows = []
         for m in metrics or []:
             name = m.get("name","")
-            value = None
             try:
                 value = float(str(m.get("value","")).replace("%","").replace(",","").strip())
             except Exception:
@@ -441,14 +466,12 @@ if st.session_state["analyses"]:
         else:
             st.info("Sayısal KPI bulunamadı.")
     with tabs[4]:
-        if active["json"]:
-            j = active["json"]
+        j = active["json"]
+        if j:
             def df_from_list_of_dicts(rows, columns):
                 if not rows: return None
-                df = pd.DataFrame(rows)
-                avail = [c for c in columns if c in df.columns]
-                if avail: df = df[avail]
-                return df
+                df = pd.DataFrame(rows); avail = [c for c in columns if c in df.columns]
+                return df[avail] if avail else df
             def csv_bytes_from_df(df): return df.to_csv(index=False).encode("utf-8")
             sections = {
                 "metrics": ["name","value","unit"],
@@ -486,14 +509,13 @@ if st.session_state["analyses"]:
         with st.chat_message("assistant"):
             with st.spinner("Yanıt hazırlanıyor..."):
                 try:
-                    ans = call_openai_qa(OpenAI(api_key=api_key), model, active["text"], st.session_state["chat"][active_id], user_q, lang)
+                    ans = call_for_qa(client, model, active["text"], st.session_state["chat"][active_id], user_q, lang)
                 except Exception as e:
                     ans = f"Hata: {e}"
                 st.markdown(ans)
                 st.session_state["chat"][active_id].append({"role":"assistant","text":ans})
-
 else:
     st.info("Önce bir analiz oluşturun.")
 
 st.markdown("---")
-st.caption("v5.3 — Cloud Pack: Streamlit Secrets uyumluluğu + PDF fix + CSV/TSV/XLSX/XLS/Parquet desteği.")
+st.caption("v5.4 — Azure/OpenAI seçimi; Azure için Responses API + PDF upload; düşük maliyet kip + retry.")
