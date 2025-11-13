@@ -1,37 +1,15 @@
-# app.py (v5.1) — Tek sayfa + Şablonlar + CSV + KPI + Sıralı Analiz + İlerleme Çubuğu + Seçim Varsayılanı
-import os
-import io
-import re
-import json
-import base64
-import time
+# app.py (v5.3 Cloud Pack) — Görsel/PDF/CSV/Excel/Parquet analizi + Q&A + KPI + Sıralı analiz
+import os, io, re, json, base64, time
 from typing import Optional, Dict, Any, List
 
 import streamlit as st
 from PIL import Image
+import requests
+import matplotlib.pyplot as plt
+import pandas as pd
+from openai import OpenAI
 
-try:
-    import requests
-except Exception:
-    raise RuntimeError("requests is not installed. Please `pip install -r requirements.txt`")
-
-try:
-    import matplotlib.pyplot as plt
-except Exception:
-    raise RuntimeError("matplotlib is not installed. Please `pip install -r requirements.txt`")
-
-try:
-    import pandas as pd
-except Exception:
-    raise RuntimeError("pandas is not installed. Please `pip install -r requirements.txt`")
-
-try:
-    from openai import OpenAI
-except Exception as e:
-    raise RuntimeError("OpenAI SDK is not installed. Please `pip install openai`") from e
-
-# ---------- CONFIG ----------
-st.set_page_config(page_title="Dashboard & Rapor Analizörü — v5.1", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Dashboard & Rapor Analizörü — v5.3", page_icon="🧠", layout="wide")
 
 # ---------- HELPERS ----------
 def b64_from_image_bytes(img_bytes: bytes, mime: str) -> str:
@@ -57,13 +35,13 @@ def safe_json_extract(text: str) -> Optional[Dict[str, Any]]:
 def build_instructions(detail_level: str, language: str, template_key: str, custom_template: str) -> str:
     base = f"""
     Sen üst düzey bir iş analisti ve veri görselleştirme uzmanısın.
-    Görev: Kullanıcının yüklediği dashboard görseli veya matbu raporu EN İNCE DETAYINA kadar incele ve aşağıdaki formatla yanıt ver.
+    Görev: Kullanıcının yüklediği dashboard görseli, matbu rapor veya tablo dosyasını EN İNCE DETAYINA kadar incele ve aşağıdaki formatla yanıt ver.
     Yazım dili: {'Türkçe' if language == 'TR' else 'English'}.
     Ton: Kısa cümleler + net madde işaretleri, teknik ama anlaşılır.
     Derinlik: {detail_level}.
 
     Yanıt formatı (AYNI MESAJ İÇİNDE iki bölüm):
-    1) **RAPOR** (insan okunur)
+    1) **RAPOR**
        - Kısa özet
        - Veri yapısı ve metrikler
        - Dikkat çeken anomaliler/aykırılıklar
@@ -71,7 +49,7 @@ def build_instructions(detail_level: str, language: str, template_key: str, cust
        - Veri kalitesi/ölçek sorunları
        - Öneriler ve aksiyon maddeleri (etki/çaba tahmini ile)
 
-    2) **JSON** (makine okunur – geçerli JSON üret)
+    2) **JSON**
        ```json
        {{
          "summary": "string",
@@ -84,34 +62,16 @@ def build_instructions(detail_level: str, language: str, template_key: str, cust
        ```
 
     Kurallar:
-    - Görselde/raporda olmayan sayı uydurma. Emin değilsen "belirsiz" de.
+    - Dosyada/görselde/raporda olmayan sayı uydurma. Emin değilsen "belirsiz" de.
     - Birim ve tarihleri açık yaz.
-    - Varsa tutarsız eksen/ölçek/hata çubuklarını işe yarar şekilde yorumla.
-    - Metin blokları/tablolar okunabiliyorsa ayıkla ve önemli alanları listele.
+    - Metin/tablolar okunabiliyorsa önemli alanları listele.
     """
-
     templates = {
         "Genel": "",
-        "Satış Performansı": """
-        - Gelir, brüt kâr, dönüşüm oranı, ort. sipariş tutarı, iptal/iade oranı odaklı incele.
-        - Bölge/ürün/kanal kırılımlarını çıkar; aykırı zirveleri/çöküşleri işaretle.
-        - Kampanya etkisini önce/sonra olarak değerlendir.
-        """,
-        "Pazarlama Kampanyası": """
-        - Harcama, gösterim, tıklama, CTR, CPC, CPM, CPA, ROAS metriklerini öne çıkar.
-        - Kanal/yaratıcı/segment bazlı performans karşılaştır.
-        - Frekans, doygunluk ve kanibalizasyon sinyallerini değerlendir.
-        """,
-        "Finans Raporu": """
-        - Gelir-gider, OPEX/CAPEX, marjlar, nakit akışı, DSO/DPO/DIO gibi çalışma sermayesi metriklerine odaklan.
-        - Dönemler arası trend ve sezonlukluk işaretle.
-        - Varsayımlar ve muhasebe politikası etkilerine dikkat çek.
-        """,
-        "IT Operasyonları": """
-        - Olay sayısı, MTTR/MTBF, başarı oranı, değişiklik başarısı, kapasite, SLA ihlalleri odaklı incele.
-        - Kök neden örüntülerini ve yüksek riskli bileşenleri işaretle.
-        - Proaktif önlemler ve runbook önerileri ver.
-        """,
+        "Satış Performansı": "- Gelir, brüt kâr, dönüşüm, AOV, iade oranı; kırılımlar ve kampanya etkisi.",
+        "Pazarlama Kampanyası": "- Harcama, CTR, CPC, CPM, CPA, ROAS; kanal/yaratıcı karşılaştır.",
+        "Finans Raporu": "- Gelir-gider, marjlar, nakit akışı, çalışma sermayesi metrikleri.",
+        "IT Operasyonları": "- Olay sayısı, MTTR/MTBF, değişiklik başarısı, kapasite ve SLA.",
     }
     base = re.sub(r"\n[ \t]+", "\n", base).strip()
     extra = templates.get(template_key, "")
@@ -134,7 +94,8 @@ def call_openai_on_image(client: "OpenAI", model: str, prompt: str, image_bytes:
     return getattr(response, "output_text", None) or response.output[0].content[0].text
 
 def call_openai_on_file(client: "OpenAI", model: str, prompt: str, file_name: str, file_bytes: bytes) -> str:
-    uploaded = client.files.create(file=(file_name, io.BytesIO(file_bytes)), purpose="input")
+    # IMPORTANT: purpose="assistants" (Responses API ile uyumlu)
+    uploaded = client.files.create(file=(file_name, io.BytesIO(file_bytes)), purpose="assistants")
     response = client.responses.create(
         model=model,
         instructions=prompt,
@@ -144,6 +105,14 @@ def call_openai_on_file(client: "OpenAI", model: str, prompt: str, file_name: st
                 {"type": "input_text", "text": "Bu dosyadaki içeriği (PDF/rapor) ayrıntılı analiz et."},
             ]}
         ],
+    )
+    return getattr(response, "output_text", None) or response.output[0].content[0].text
+
+def call_openai_on_table(client: "OpenAI", model: str, prompt: str, table_prompt: str) -> str:
+    response = client.responses.create(
+        model=model,
+        instructions=prompt,
+        input=[{"role": "user", "content": [{"type": "input_text", "text": table_prompt}]}],
     )
     return getattr(response, "output_text", None) or response.output[0].content[0].text
 
@@ -168,9 +137,7 @@ def call_openai_qa(client: "OpenAI", model: str, analysis_text: str, history: Li
     response = client.responses.create(
         model=model,
         instructions="Analizdeki bilgiye sadık kal. Belirsizse varsayım yapmadan 'emin değilim' de.",
-        input=[
-            {"role": "user", "content": [{"type": "input_text", "text": qa_prompt}]}
-        ],
+        input=[{"role": "user", "content": [{"type": "input_text", "text": qa_prompt}]}],
     )
     return getattr(response, "output_text", None) or response.output[0].content[0].text
 
@@ -178,69 +145,96 @@ def fetch_from_url(url: str) -> Optional[tuple]:
     try:
         r = requests.get(url, timeout=30)
         r.raise_for_status()
-        content_type = r.headers.get("Content-Type", "").lower()
+        content_type = (r.headers.get("Content-Type") or "").lower()
         data = r.content
-        if "pdf" in content_type or url.lower().endswith(".pdf"):
+        u = url.lower()
+
+        # PDF & Görseller
+        if "pdf" in content_type or u.endswith(".pdf"):
             return ("application/pdf", data)
-        if "png" in content_type or url.lower().endswith(".png"):
+        if "png" in content_type or u.endswith(".png"):
             return ("image/png", data)
-        if "jpeg" in content_type or "jpg" in content_type or url.lower().endswith((".jpg",".jpeg")):
+        if "jpeg" in content_type or "jpg" in content_type or u.endswith((".jpg",".jpeg")):
             return ("image/jpeg", data)
+
+        # Tablo dosyaları
+        if "text/csv" in content_type or u.endswith(".csv"):
+            return ("text/csv", data)
+        if "text/tab-separated-values" in content_type or u.endswith(".tsv"):
+            return ("text/tsv", data)
+        if "spreadsheet" in content_type or "sheet" in content_type or u.endswith((".xlsx",".xls")):
+            return ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", data)
+        if "parquet" in content_type or u.endswith(".parquet"):
+            return ("application/parquet", data)
+
         return None
     except Exception:
         return None
 
-def extract_numeric(val: Any) -> Optional[float]:
-    if val is None:
-        return None
-    if isinstance(val, (int,float)):
-        return float(val)
-    s = str(val).strip()
-    s = s.replace("%","").replace(",","").replace(" ","")
-    m = re.match(r"^-?\d+(\.\d+)?$", s)
-    if m:
-        return float(s)
-    return None
+def _limit_df(df: pd.DataFrame, max_rows: int = 100, max_cols: int = 50) -> pd.DataFrame:
+    df2 = df.copy()
+    if df2.shape[1] > max_cols:
+        df2 = df2.iloc[:, :max_cols]
+    if df2.shape[0] > max_rows:
+        df2 = df2.iloc[:max_rows, :]
+    return df2
 
-def df_from_list_of_dicts(rows: List[dict], columns: List[str]) -> Optional[pd.DataFrame]:
-    if not rows:
-        return None
-    df = pd.DataFrame(rows)
-    avail = [c for c in columns if c in df.columns]
-    if avail:
-        df = df[avail]
-    return df
+def dataframe_to_prompt(df: pd.DataFrame, file_name: str) -> str:
+    df_limited = _limit_df(df)
+    schema_lines = [f"- {c}: {str(df[c].dtype)}" for c in df_limited.columns]
+    try:
+        preview = df_limited.head(10).to_markdown(index=False)
+    except Exception:
+        preview = df_limited.head(10).to_csv(index=False)
+    try:
+        stats = df_limited.describe(include='all').transpose().fillna("").to_markdown()
+    except Exception:
+        stats = "(istatistik üretilemedi)"
+    return (
+        f"Dosya adı: {file_name}\n"
+        f"Satır x Sütun: {df.shape[0]} x {df.shape[1]}\n\n"
+        f"Şema:\n" + "\n".join(schema_lines) + "\n\n"
+        f"İlk 10 satır:\n{preview}\n\n"
+        f"Temel istatistikler (sınırlı):\n{stats}\n"
+        f"\nYukarıdaki tablo özetini, verilen talimatlarla birlikte ayrıntılı analiz et."
+    )
 
-def csv_bytes_from_df(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
+def read_table_file(file_name: str, file_bytes: bytes, mime: str) -> pd.DataFrame:
+    buf = io.BytesIO(file_bytes)
+    lname = file_name.lower()
+    if mime == "text/csv" or lname.endswith(".csv"):
+        return pd.read_csv(buf)
+    if mime == "text/tsv" or lname.endswith(".tsv"):
+        return pd.read_csv(buf, sep="\t")
+    if "spreadsheetml" in mime or lname.endswith((".xlsx",".xls")):
+        return pd.read_excel(buf)
+    if "parquet" in mime or lname.endswith(".parquet"):
+        return pd.read_parquet(buf)  # pyarrow gerekir
+    # Son çare: csv dene
+    return pd.read_csv(buf)
 
-def render_metrics_chart(json_blob: dict, title: str = "JSON -> Metrikler"):
-    if not json_blob or not isinstance(json_blob, dict):
-        st.info("Grafik için geçerli JSON bulunamadı.")
-        return
-    metrics = json_blob.get("metrics") or []
-    rows = []
-    for m in metrics:
-        name = m.get("name","")
-        value = extract_numeric(m.get("value"))
-        unit = m.get("unit")
-        if value is not None:
-            rows.append((name, value, unit))
-    if not rows:
-        st.info("Sayısal metrik bulunamadı.")
-        return
-    names = [r[0] for r in rows][:30]
-    vals  = [r[1] for r in rows][:30]
-    fig = plt.figure()
-    plt.bar(range(len(vals)), vals)
-    plt.xticks(range(len(names)), names, rotation=45, ha="right")
-    plt.title(title)
-    plt.tight_layout()
-    st.pyplot(fig)
+# ---------- UI ----------
+st.title("🧠 Dashboard & Rapor Analizörü (v5.3)")
+st.caption("Analiz + Q&A • Şablonlar • CSV/Excel/Parquet • KPI • Sıralı analiz + ilerleme çubuğu")
 
+# Secrets/Env otomatik doldurma
+default_api_key = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+
+st.sidebar.title("⚙️ Ayarlar")
+api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=default_api_key)
+model = st.sidebar.selectbox("Model", ["gpt-4o", "gpt-4o-mini"])
+detail = st.sidebar.selectbox("Detay seviyesi", ["çok yüksek", "yüksek", "orta"])
+lang = st.sidebar.selectbox("Çıktı dili", ["TR", "EN"], index=0)
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🧩 Rapor Şablonu")
+template_key = st.sidebar.selectbox("Şablon", ["Genel","Satış Performansı","Pazarlama Kampanyası","Finans Raporu","IT Operasyonları"], index=0)
+custom_template = st.sidebar.text_area("Özel şablon ekle (opsiyonel)", height=120, placeholder="Ek talimatlar...")
+
+st.sidebar.markdown("---")
+kpi_txt = st.sidebar.text_area("KPI hedefleri (JSON veya 'Ad=Değer' satırları)", height=120, placeholder='{"Revenue": 1000000, "CR": 2.5}')
 def parse_kpi_targets(txt: str) -> Dict[str, float]:
-    if not txt:
-        return {}
+    if not txt: return {}
     txt = txt.strip()
     try:
         obj = json.loads(txt)
@@ -259,51 +253,6 @@ def parse_kpi_targets(txt: str) -> Dict[str, float]:
             except Exception:
                 continue
     return targets
-
-def show_kpi_cards(json_blob: dict, targets: Dict[str, float], max_cards: int = 6):
-    st.markdown("#### KPI Kartları")
-    if not json_blob:
-        st.info("KPI için geçerli JSON bulunamadı.")
-        return
-    metrics = json_blob.get("metrics") or []
-    parsed = []
-    for m in metrics:
-        name = m.get("name","")
-        val = extract_numeric(m.get("value"))
-        unit = m.get("unit")
-        if val is not None and name:
-            parsed.append((name, val, unit))
-    if not parsed:
-        st.info("Sayısal KPI bulunamadı.")
-        return
-    parsed = parsed[:max_cards]
-    cols = st.columns(len(parsed))
-    for i,(name,val,unit) in enumerate(parsed):
-        target = targets.get(name)
-        if target is not None:
-            delta = val - target
-            delta_str = f"{delta:.2f}" if unit is None else f"{delta:.2f} {unit}"
-            cols[i].metric(name, f"{val:.2f}" + (f" {unit}" if unit else ""), delta=delta_str)
-        else:
-            cols[i].metric(name, f"{val:.2f}" + (f" {unit}" if unit else ""))
-
-# ---------- UI (single page) ----------
-st.title("🧠 Dashboard & Matbu Rapor Analizörü (v5.1)")
-st.caption("Aynı pencerede analiz + takip soruları • Şablonlar • CSV • KPI • Sıralı analiz + ilerleme çubuğu")
-
-st.sidebar.title("⚙️ Ayarlar")
-api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=os.getenv("OPENAI_API_KEY", ""))
-model = st.sidebar.selectbox("Model", ["gpt-4o", "gpt-4o-mini"])
-detail = st.sidebar.selectbox("Detay seviyesi", ["çok yüksek", "yüksek", "orta"])
-lang = st.sidebar.selectbox("Çıktı dili", ["TR", "EN"], index=0)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🧩 Rapor Şablonu")
-template_key = st.sidebar.selectbox("Şablon", ["Genel","Satış Performansı","Pazarlama Kampanyası","Finans Raporu","IT Operasyonları"], index=0)
-custom_template = st.sidebar.text_area("Özel şablon ekle (opsiyonel)", height=120, placeholder="Ek talimatlar...")
-
-st.sidebar.markdown("---")
-kpi_txt = st.sidebar.text_area("KPI hedefleri (JSON veya 'Ad=Değer' satırları)", height=120, placeholder='{"Revenue": 1000000, "CR": 2.5}')
 kpi_targets = parse_kpi_targets(kpi_txt)
 
 st.sidebar.markdown("---")
@@ -311,12 +260,11 @@ order_url_pos = st.sidebar.selectbox("URL dosyasının sırası", ["En sonda", "
 default_active_choice = st.sidebar.selectbox("Varsayılan aktif analiz", ["Son", "İlk"], index=0)
 
 if not api_key:
-    st.info("Sol menüden bir OpenAI API anahtarı girilmeli.")
+    st.info("Sol menüden bir OpenAI API anahtarı girilmeli (veya Secrets'a eklenmeli).")
     st.stop()
 
 client = OpenAI(api_key=api_key)
 
-# Keep session state
 if "analyses" not in st.session_state:
     st.session_state["analyses"] = []  # list of dicts: {id, name, text, json}
 if "chat" not in st.session_state:
@@ -325,9 +273,13 @@ if "chat" not in st.session_state:
 st.subheader("1) Dosya yükleyin veya URL verin")
 colu, colv = st.columns([1,1])
 with colu:
-    uploaded_files = st.file_uploader("Görsel (PNG/JPG) veya PDF", type=["png","jpg","jpeg","pdf"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Görsel (PNG/JPG) • PDF • Tablo (CSV/TSV/XLSX/XLS/Parquet)",
+        type=["png","jpg","jpeg","pdf","csv","tsv","xlsx","xls","parquet"],
+        accept_multiple_files=True
+    )
 with colv:
-    url_input = st.text_input("Veya dosya URL'si", placeholder="https://... .png / .jpg / .pdf")
+    url_input = st.text_input("Veya dosya URL'si", placeholder="https://... (.png/.jpg/.pdf/.csv/.xlsx/.parquet)")
 
 user_notes = st.text_area("Notlar/Hedefler (opsiyonel)", height=100)
 
@@ -349,7 +301,7 @@ if st.button("Analizi Başlat", type="primary"):
             else:
                 files_to_process.append((len(files_to_process), "from_url", data, mime))
         else:
-            st.error("URL indirilemedi veya dosya tipi desteklenmiyor (yalnızca PNG/JPG/PDF).")
+            st.error("URL indirilemedi veya dosya tipi desteklenmiyor.")
 
     if not files_to_process:
         st.warning("Lütfen en az bir dosya seçin veya geçerli bir URL girin.")
@@ -367,6 +319,7 @@ if st.button("Analizi Başlat", type="primary"):
         for i, (order, file_name, file_bytes, mime) in enumerate(files_to_process, start=1):
             with st.spinner(f"{i}/{total} {file_name} analiz ediliyor..."):
                 try:
+                    # --- GÖRSEL ---
                     if mime in ("image/png", "image/jpeg"):
                         try:
                             img = Image.open(io.BytesIO(file_bytes))
@@ -374,10 +327,28 @@ if st.button("Analizi Başlat", type="primary"):
                         except Exception:
                             pass
                         text = call_openai_on_image(client, model, instructions, file_bytes, mime)
+
+                    # --- PDF ---
                     elif mime == "application/pdf":
                         text = call_openai_on_file(client, model, instructions, file_name if file_name!="from_url" else "from_url.pdf", file_bytes)
+
+                    # --- TABLO DOSYALARI ---
+                    elif mime in ("text/csv", "text/tsv",
+                                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                  "application/parquet") or file_name.lower().endswith((".csv",".tsv",".xlsx",".xls",".parquet")):
+                        try:
+                            df = read_table_file(file_name, file_bytes, mime)
+                            st.write("Tablo önizleme (ilk 10 satır):")
+                            st.dataframe(_limit_df(df, max_rows=10, max_cols=20), use_container_width=True)
+                        except Exception as e:
+                            st.error(f"{file_name}: Tablo okunamadı. Hata: {e}")
+                            progress.progress(i/total)
+                            continue
+                        table_prompt = dataframe_to_prompt(df, file_name)
+                        text = call_openai_on_table(client, model, instructions, table_prompt)
+
                     else:
-                        st.error(f"{file_name}: Desteklenmeyen MIME tipi {mime}")
+                        st.error(f"{file_name}: Desteklenmeyen MIME tipi ({mime}).")
                         progress.progress(i/total)
                         continue
 
@@ -419,12 +390,66 @@ if st.session_state["analyses"]:
         else:
             st.warning("Geçerli JSON algılanamadı. Ham çıktıya bakın.")
     with tabs[2]:
-        render_metrics_chart(active["json"], title="JSON -> Metrikler")
+        # JSON->Bar chart
+        metrics = (active["json"] or {}).get("metrics") if active["json"] else []
+        rows = []
+        for m in metrics or []:
+            name = m.get("name","")
+            value = None
+            try:
+                value = float(str(m.get("value","")).replace("%","").replace(",","").strip())
+            except Exception:
+                value = None
+            if name and value is not None:
+                rows.append((name, value))
+        if rows:
+            names = [r[0] for r in rows][:30]
+            vals  = [r[1] for r in rows][:30]
+            fig = plt.figure()
+            plt.bar(range(len(vals)), vals)
+            plt.xticks(range(len(names)), names, rotation=45, ha="right")
+            plt.title("JSON -> Metrikler")
+            plt.tight_layout()
+            st.pyplot(fig)
+        else:
+            st.info("Sayısal metrik bulunamadı.")
     with tabs[3]:
-        show_kpi_cards(active["json"], kpi_targets, max_cards=6)
+        st.markdown("#### KPI Kartları")
+        metrics = (active["json"] or {}).get("metrics") if active["json"] else []
+        parsed = []
+        for m in metrics or []:
+            name = m.get("name","")
+            val = None
+            try:
+                val = float(str(m.get("value","")).replace("%","").replace(",","").strip())
+            except Exception:
+                val = None
+            unit = m.get("unit")
+            if (val is not None) and name:
+                parsed.append((name, val, unit))
+        if parsed:
+            parsed = parsed[:6]
+            cols = st.columns(len(parsed))
+            for i,(name,val,unit) in enumerate(parsed):
+                target = (kpi_targets or {}).get(name)
+                if target is not None:
+                    delta = val - target
+                    delta_str = f"{delta:.2f}" if unit is None else f"{delta:.2f} {unit}"
+                    cols[i].metric(name, f"{val:.2f}" + (f" {unit}" if unit else ""), delta=delta_str)
+                else:
+                    cols[i].metric(name, f"{val:.2f}" + (f" {unit}" if unit else ""))
+        else:
+            st.info("Sayısal KPI bulunamadı.")
     with tabs[4]:
         if active["json"]:
             j = active["json"]
+            def df_from_list_of_dicts(rows, columns):
+                if not rows: return None
+                df = pd.DataFrame(rows)
+                avail = [c for c in columns if c in df.columns]
+                if avail: df = df[avail]
+                return df
+            def csv_bytes_from_df(df): return df.to_csv(index=False).encode("utf-8")
             sections = {
                 "metrics": ["name","value","unit"],
                 "anomalies": ["title","where","why"],
@@ -471,4 +496,4 @@ else:
     st.info("Önce bir analiz oluşturun.")
 
 st.markdown("---")
-st.caption("v5.1 — Sıralı analiz ve ilerleme çubuğu eklendi. URL dosyasının yeri ve varsayılan aktif analiz ayarlanabilir.")
+st.caption("v5.3 — Cloud Pack: Streamlit Secrets uyumluluğu + PDF fix + CSV/TSV/XLSX/XLS/Parquet desteği.")
